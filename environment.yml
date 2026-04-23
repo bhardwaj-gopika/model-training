@@ -1,0 +1,18 @@
+name: modeling
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  # Core scientific stack (available on conda-forge)
+  - numpy>=2.0
+  - pandas>=2.0
+  - scipy>=1.12
+  - h5py>=3.10
+  - matplotlib>=3.9
+  - pyyaml>=6.0
+  - openpmd-beamphysics>=0.14
+  # pip-only packages
+  - pip
+  - pip:
+    - torch>=2.1
