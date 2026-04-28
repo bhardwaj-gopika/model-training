@@ -139,7 +139,7 @@ def create_lume_torch(model, input_tr):
         precision="single",
     )
 
-    torch_model.dump("lumetorchyaml/injector_machine.yaml", save_jit=True)
+    torch_model.dump("lumetorchyaml-nojit/injector_machine.yaml")
 
     return TorchModule(model=torch_model)
 

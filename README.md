@@ -1,8 +1,8 @@
 # Modeling Data Preparation Pipeline
 
-This repository contains the scripts used to turn `dump.yaml` into a reproducible machine learning dataset for predicting 6×6 beam covariance matrices.
+This repository contains the scripts used to turn `dump.yaml` into a reproducible machine learning dataset for predicting 6x6 beam covariance matrices.
 
-The model takes 38 accelerator input parameters and directly outputs the 6×6 covariance matrix of the beam phase space `(x, px, y, py, z, pz)`. Internally the network predicts 21 lower-triangular Cholesky factors, then reconstructs `C = L @ Lᵀ`. Training is performed in normalized covariance space (per-element mean/std from the training set), with either MSE or L1 loss.
+The current model is trained on 7 approved simulator-space input parameters and predicts the 6x6 covariance matrix of the beam phase space `(x, px, y, py, z, pz)`. Internally the network predicts 21 lower-triangular Cholesky factors, reconstructs `C = L @ L^T`, and computes loss in normalized covariance space using per-element statistics from the training split. The inference entrypoint also supports machine-facing PV inputs by mapping them into simulator parameter space before normalization and model evaluation.
 
 ## Environment
 
@@ -15,17 +15,18 @@ conda activate modeling
 
 ## End-to-End Workflow
 
-The pipeline has nine stages:
+The current workflow has 10 stages:
 
 1. Convert `dump.yaml` to CSV
 2. Remove rows without `particles_241`
 3. Create Cholesky covariance targets from particle files
-4. Drop non-feature and non-target columns to build the final dataset
+4. Keep the approved model inputs and target columns
 5. Split the dataset into train, validation, and test CSVs
-6. (Optional) Create an interpolation holdout from the training set
-7. Train the covariance MLP
-8. Analyze model performance
-9. (Optional) Plot input parameter distributions
+6. Train the covariance MLP
+7. Analyze model performance
+8. Run inference from simulator or machine inputs
+9. (Optional) Create an interpolation holdout
+10. (Optional) Plot input parameter distributions
 
 All commands below assume you are running them from the repository root.
 
@@ -84,7 +85,7 @@ Notes:
 
 ## 4. Create the Final Dataset
 
-Remove metadata, file-path, scalarized, emittance, sigma, and other non-training columns:
+Keep only the approved model inputs and covariance targets:
 
 ```bash
 python create_dataset.py cov-targets.csv dataset.csv
@@ -97,9 +98,9 @@ Expected output:
 
 Current dataset structure:
 
-- 38 feature columns
+- 7 feature columns
 - 21 target columns: `cov_chol_0` through `cov_chol_20`
-- Total: 59 columns
+- Total: 28 columns
 
 ### Feature and Target Columns
 
@@ -108,41 +109,10 @@ Feature columns:
 - `CQ10121:b1_gradient`
 - `GUNF:rf_field_scale`
 - `GUNF:theta0_deg`
-- `L0AF_phase:theta0_deg`
-- `L0AF_scale:rf_field_scale`
-- `L0BF_phase:theta0_deg`
-- `L0BF_scale:rf_field_scale`
-- `QA10361`
-- `QA10371`
-- `QE10425`
-- `QE10441`
-- `QE10511`
-- `QE10525`
 - `SOL10111:solenoid_field_scale`
 - `SQ10122:b1_gradient`
-- `bmad_L0BF_phase:theta0_deg`
-- `bmad_L0BF_scale:rf_field_scale`
-- `bmad_QA10361`
-- `bmad_QA10371`
-- `bmad_QE10425`
-- `bmad_QE10441`
-- `bmad_QE10511`
-- `bmad_QE10525`
-- `bmad_bmad_phase_offset`
-- `distgen:VCC`
 - `distgen:t_dist:sigma_t:value`
 - `distgen:total_charge:value`
-- `impact_CQ10121:b1_gradient`
-- `impact_GUNF:rf_field_scale`
-- `impact_GUNF:theta0_deg`
-- `impact_L0AF_phase:theta0_deg`
-- `impact_L0AF_scale:rf_field_scale`
-- `impact_SOL10111:solenoid_field_scale`
-- `impact_SQ10122:b1_gradient`
-- `impact_VCC_Cal`
-- `impact_distgen:t_dist:sigma_t:value`
-- `impact_distgen:total_charge:value`
-- `n_particles_241`
 
 Target columns:
 
@@ -209,13 +179,12 @@ python split_dataset.py \
 
 ## 6. Train the Model
 
-The model outputs the full 6×6 covariance matrix directly. Targets are the 21 lower-triangular Cholesky factors (`cov_chol_0..20`); the network reconstructs `C = L @ Lᵀ` internally. Loss is computed in per-element normalized covariance space.
+The model consumes the 7 simulator-space inputs above and outputs a full 6x6 covariance matrix. Targets are the 21 lower-triangular Cholesky factors (`cov_chol_0..20`); the network reconstructs `C = L @ L^T` internally. Loss is computed in per-element normalized covariance space.
 
-### Quick start (recommended settings)
+### Quick start
 
 ```bash
 python train.py \
-  --loss-space cov \
   --cov-loss l1 \
   --epochs 200 \
   --patience 40 \
@@ -224,13 +193,10 @@ python train.py \
   --output-dir model-output-cov-l1
 ```
 
-### With staged fine-tuning (best results)
-
-After base training the script runs additional fine-tuning stages with progressively smaller batch sizes to improve performance on difficult examples:
+### With staged fine-tuning
 
 ```bash
 python train.py \
-  --loss-space cov \
   --cov-loss l1 \
   --epochs 200 \
   --patience 40 \
@@ -249,56 +215,57 @@ python train.py \
 
 | Flag | Default | Description |
 |---|---|---|
-| `--cov-loss` | `mse` | Covariance-space objective: `mse` or `l1`. L1 gives significantly better MAPE (~11% vs ~26%) |
+| `--cov-loss` | `mse` | Covariance-space objective: `mse` or `l1` |
 | `--epochs` | `200` | Max training epochs |
-| `--patience` | `20` | Early-stopping patience in epochs (0 = disabled) |
+| `--patience` | `20` | Early-stopping patience in epochs (`0` disables) |
 | `--batch-size` | `256` | Mini-batch size |
-| `--lr` | `1e-3` | Initial learning rate (halved via `ReduceLROnPlateau` after 10 stagnant epochs) |
-| `--finetune-batch-sizes` | `None` | Space-separated batch sizes for staged fine-tuning, e.g. `32 8 2` |
+| `--lr` | `1e-3` | Initial learning rate |
+| `--finetune-batch-sizes` | `None` | Space-separated batch sizes for staged fine-tuning, for example `32 8 2` |
 | `--finetune-epochs-per-stage` | `0` | Epochs per fine-tuning stage |
 | `--finetune-lr` | `1e-4` | Initial LR for fine-tuning |
 | `--finetune-lr-decay` | `0.5` | LR multiplier applied after each stage |
+| `--finetune-plateau-patience` | `5` | Plateau patience during fine-tuning |
 | `--finetune-min-lr` | `1e-6` | Minimum LR floor during fine-tuning |
-| `--output-dir` | `model-output` | Directory for checkpoint and transformer files |
+| `--output-dir` | `model-output` | Directory for checkpoints and transformer files |
 
 ### Generated files in `--output-dir`
 
-- `model.pt` — best-val-loss model weights
-- `input_transformers.pt` — input feature scaler (`x_mean`, `x_std`) and feature column names
-- `output_transformers.pt` — Cholesky target scaler (`y_mean`, `y_std`) and target column names
-- `covariance_transformers.pt` — per-element covariance normalizers (`cov_mean`, `cov_std`, `cov_labels`)
-- `training_history.csv` — per-epoch train/val loss
+- `model.pt` - best validation checkpoint
+- `input_transformers.pt` - input feature scaler (`x_mean`, `x_std`) and `feature_cols`
+- `output_transformers.pt` - Cholesky target scaler (`y_mean`, `y_std`) and `target_cols`
+- `covariance_transformers.pt` - per-element covariance normalizers (`cov_mean`, `cov_std`, `cov_labels`)
+- `training_history.csv` - per-epoch train and validation loss
 
 ### Model architecture
 
-38 inputs → 21 Cholesky outputs → 6×6 covariance output:
+7 inputs -> 21 Cholesky outputs -> 6x6 covariance output:
 
-```
-Linear(38 → 100), ELU
-Linear(100 → 200), ELU, Dropout(0.05)
-Linear(200 → 200), ELU, Dropout(0.05)
-Linear(200 → 300), ELU, Dropout(0.05)
-Linear(300 → 300), ELU, Dropout(0.05)
-Linear(300 → 200), ELU, Dropout(0.05)
-Linear(200 → 100), ELU, Dropout(0.05)
-Linear(100 → 100), ELU
-Linear(100 → 100), ELU
-Linear(100 → 21)  → build L (lower-triangular) → C = L @ Lᵀ
+```text
+Linear(7 -> 100), ELU
+Linear(100 -> 200), ELU, Dropout(0.05)
+Linear(200 -> 200), ELU, Dropout(0.05)
+Linear(200 -> 300), ELU, Dropout(0.05)
+Linear(300 -> 300), ELU, Dropout(0.05)
+Linear(300 -> 200), ELU, Dropout(0.05)
+Linear(200 -> 100), ELU, Dropout(0.05)
+Linear(100 -> 100), ELU
+Linear(100 -> 100), ELU
+Linear(100 -> 21) -> build L (lower triangular) -> C = L @ L^T
 ```
 
 ### Normalization
 
-Loss is computed in normalized covariance space. Before training, per-element mean (μᵢⱼ) and standard deviation (σᵢⱼ) are computed from the training-set covariance matrices for all 36 elements. The normalized MSE/L1 loss is:
+Before training, the code computes:
 
-```
-L = mean_{i,j} loss_fn( (Ĉᵢⱼ - μᵢⱼ) / σᵢⱼ, (Cᵢⱼ - μᵢⱼ) / σᵢⱼ )
-```
+- `x_mean`, `x_std` from the training split inputs
+- `y_mean`, `y_std` from the training split Cholesky targets
+- `cov_mean`, `cov_std` from the reconstructed training split covariance matrices
 
-This correctly handles the block-diagonal structure of the covariance matrix: elements like σ²_{pz} (~10⁸) and cross-plane off-diagonals (~10⁻⁹) each contribute equally to the loss regardless of their raw magnitude.
+The loss is then applied in normalized covariance space so each covariance element contributes on a comparable scale.
 
 ## 7. Analyze Model Performance
 
-Use `analyze_covariance.py` for all models trained with the current `train.py`. This script evaluates the model on the test set and produces several plots.
+Use `analyze_covariance.py` for models trained with the current `train.py`.
 
 ```bash
 python analyze_covariance.py \
@@ -307,38 +274,101 @@ python analyze_covariance.py \
   --agreement-csv dataset-train.csv
 ```
 
-### Key options
+Generated files in `--output-dir` include:
 
-| Flag | Default | Description |
-|---|---|---|
-| `--model-dir` | `model-output` | Directory containing `model.pt` and transformer files |
-| `--test-csv` | `dataset-test.csv` | CSV for evaluation metrics |
-| `--output-dir` | `analysis-output-covariance` | Directory for plots and CSV results |
-| `--agreement-csv` | `dataset-train.csv` | CSV for per-sample agreement overlay plots |
-| `--agreement-max-samples` | `1000` | Max samples shown in overlay/dot plots |
-| `--agreement-zoom-low-q` | `5` | Lower percentile for y-axis zoom in dot plot |
-| `--agreement-zoom-high-q` | `95` | Upper percentile for y-axis zoom in dot plot |
-| `--skip-scatter` | `False` | Skip scatter (pred vs true) plots |
-| `--skip-sorted` | `False` | Skip sorted-by-magnitude overlay plots |
+- `test_metrics.csv` - per-element MAE, RMSE, normalized RMSE, and MAPE for all 36 covariance entries
+- `training_curve.png` - train and validation loss vs epoch
+- `mae_per_element.png`
+- `mape_per_element.png`
+- `per_sample_agreement_overlay.png`
+- `per_sample_agreement_zoomed_dots.png`
+- `scatter_pred_vs_true.png`
+- `sorted_by_magnitude_overlay.png`
+- `covariance_histograms.png`
+- `covariance_std_heatmap.png`
 
-### Generated files in `--output-dir`
+## 8. Run Inference
 
-- `test_metrics.csv` — per-element MAE, RMSE, normalized RMSE, MAPE for all 36 covariance entries
-- `training_curve.png` — train/val loss vs epoch
-- `mae_per_element.png` — bar chart of MAE per covariance element
-- `mape_per_element.png` — bar chart of MAPE per covariance element (most interpretable)
-- `per_sample_agreement_overlay.png` — predicted vs true as overlaid lines per element
-- `per_sample_agreement_zoomed_dots.png` — same but as dots with percentile y-zoom
-- `scatter_pred_vs_true.png` — predicted vs true scatter with R² per element
-- `sorted_by_magnitude_overlay.png` — samples sorted by |true| with predicted overlaid
-- `covariance_histograms.png` — distribution of target vs predicted per element (6×6 grid)
-- `covariance_std_heatmap.png` — log10(std) heatmap confirming block-diagonal structure
+Use `infer_covariance.py` to run the trained model on either simulator-space inputs or machine-facing PV inputs.
 
-> **Note**: `analyze.py` is the old Cholesky-output analysis script and is **incompatible** with models trained with the current `train.py`. Always use `analyze_covariance.py` for current models.
+### Supported input schemas
 
-## 8. (Optional) Create an Interpolation Holdout
+Simulator-space columns must match the 7 training features exactly:
 
-To test how well the model interpolates, exclude a contiguous block of samples from the middle of the training set when sorted by a chosen input parameter:
+- `CQ10121:b1_gradient`
+- `GUNF:rf_field_scale`
+- `GUNF:theta0_deg`
+- `SOL10111:solenoid_field_scale`
+- `SQ10122:b1_gradient`
+- `distgen:t_dist:sigma_t:value`
+- `distgen:total_charge:value`
+
+Machine-facing columns are derived from `pv_mapping.py` in the same feature order:
+
+- `QUAD:IN10:121:BACT`
+- `KLYS:LI10:21:AMPL`
+- `KLYS:LI10:21:PHAS`
+- `SOLN:IN10:121:BACT`
+- `QUAD:IN10:122:BACT`
+- `distgen:t_dist:sigma_t:value`
+- `TORO:IN10:591:TMIT_PC`
+
+The sixth input currently has no machine PV alias, so its machine-input name remains `distgen:t_dist:sigma_t:value`.
+
+### Input-space selection
+
+`infer_covariance.py` supports `--input-space auto|sim|pv`:
+
+- `auto` detects the schema from the CSV headers and prefers the PV schema when both are present.
+- `sim` requires the 7 simulator columns.
+- `pv` requires the 7 machine-facing columns listed above.
+
+### Inference logic
+
+The inference path is:
+
+1. Load `model.pt` and `input_transformers.pt` from `--model-dir`.
+2. Read the input CSV and resolve whether it is simulator-space or machine-space input.
+3. If the CSV is machine-space, map PV values into simulator parameter space using the affine rules in `pv_mapping.py`.
+4. Normalize the simulator-space inputs with the saved training `x_mean` and `x_std`.
+5. Run the surrogate model to produce a `(N, 6, 6)` covariance prediction array.
+6. Export a `lume-torch` wrapper, run the same machine inputs through that wrapper, and assert that the direct and wrapper predictions match.
+7. Save both a flat CSV and a NumPy array of the predictions.
+
+### Example: simulator-space inference
+
+```bash
+python infer_covariance.py \
+  --model-dir model-output-cov-l1 \
+  --input-csv dataset-test.csv \
+  --input-space sim \
+  --output-dir inference-sim
+```
+
+### Example: machine-PV inference
+
+```bash
+python infer_covariance.py \
+  --model-dir model-output-cov-l1 \
+  --input-csv machine-input-test.csv \
+  --input-space pv \
+  --output-dir inference-machine-test
+```
+
+### Generated outputs
+
+- `predicted_covariances.csv` - one row per sample containing:
+  - `sample_index`
+  - the machine-space inputs used for evaluation
+  - `sim_<feature>` columns containing the mapped simulator values
+  - `pred_cov_00` through `pred_cov_55`
+- `predicted_covariances.npy` - raw `(N, 6, 6)` prediction array
+
+The script also prints one selected covariance matrix, the machine-space inputs for that row, and the mapped simulator-space values. `--print-row` defaults to `0`.
+
+## 9. (Optional) Create an Interpolation Holdout
+
+To test interpolation performance, exclude a contiguous block of samples from the middle of the training set when sorted by a chosen input parameter:
 
 ```bash
 python create_interpolation_holdout.py dataset-train.csv \
@@ -350,31 +380,29 @@ python create_interpolation_holdout.py dataset-train.csv \
 ```
 
 This produces:
-- `dataset-train-sigmat-gap30-train.csv` — reduced training set (gap removed)
-- `dataset-train-sigmat-gap30-secondary-test.csv` — the 30 held-out interpolation samples
-- `dataset-train-sigmat-gap30-summary.csv` — gap range and row-count summary
 
-### Key options
+- `dataset-train-sigmat-gap30-train.csv` - reduced training set with the gap removed
+- `dataset-train-sigmat-gap30-secondary-test.csv` - held-out interpolation samples
+- `dataset-train-sigmat-gap30-summary.csv` - gap range and row-count summary
 
-| Flag | Default | Description |
-|---|---|---|
-| `--sort-column` | required | Feature to sort on before extracting the holdout block |
-| `--holdout-size` | `30` | Number of rows to remove |
-| `--center-fraction` | `0.5` | Position of the block centre in sorted order (0=bottom, 1=top) |
-| `--expand-equal-boundaries` | off | Expand block to include all rows with the same value as the block edges, ensuring a true feature gap |
-
-Then train and evaluate on the gap:
+Example training and evaluation on the gap split:
 
 ```bash
 python train.py \
   --train-csv dataset-train-sigmat-gap30-train.csv \
   --val-csv dataset-val.csv \
   --test-csv dataset-train-sigmat-gap30-secondary-test.csv \
-  --loss-space cov --cov-loss l1 \
-  --epochs 200 --patience 40 --batch-size 256 --lr 1e-3 \
-  --finetune-batch-sizes 32 8 2 --finetune-epochs-per-stage 300 \
-  --finetune-lr 1e-4 --finetune-lr-decay 0.5 \
-  --finetune-plateau-patience 5 --finetune-min-lr 1e-6 \
+  --cov-loss l1 \
+  --epochs 200 \
+  --patience 40 \
+  --batch-size 256 \
+  --lr 1e-3 \
+  --finetune-batch-sizes 32 8 2 \
+  --finetune-epochs-per-stage 300 \
+  --finetune-lr 1e-4 \
+  --finetune-lr-decay 0.5 \
+  --finetune-plateau-patience 5 \
+  --finetune-min-lr 1e-6 \
   --output-dir model-output-interp-sigmat-gap30-l1
 
 python analyze_covariance.py \
@@ -384,9 +412,7 @@ python analyze_covariance.py \
   --output-dir analysis-output-interp-sigmat-gap30-l1
 ```
 
-> **Choosing `--sort-column`**: Features with many unique values produce the most meaningful interpolation gaps. Good candidates in this dataset: `distgen:t_dist:sigma_t:value` (~6233 unique), `L0AF_phase:theta0_deg` (~6259 unique), `distgen:total_charge:value` (~6266 unique). Avoid `SOL10111:solenoid_field_scale` — it is concentrated around a single median value.
-
-## 9. (Optional) Plot Input Parameter Distributions
+## 10. (Optional) Plot Input Parameter Distributions
 
 ```bash
 python plot_input_histograms.py \
@@ -395,8 +421,9 @@ python plot_input_histograms.py \
 ```
 
 Generates:
-- `input_parameter_histograms.png` — 6×7 histogram grid of all 38 input features with mean/std annotations
-- `input_parameter_stats.csv` — full statistics table (mean, std, min, max, median, q25, q75)
+
+- `input_parameter_histograms.png` - histogram grid for all input features in the provided CSV
+- `input_parameter_stats.csv` - summary statistics for each input feature
 
 ## Reproducible Command Sequence
 
@@ -410,13 +437,19 @@ python create_cov_targets_from_particles.py dump-particles_241-not-null.csv cov-
 python create_dataset.py cov-targets.csv dataset.csv
 python split_dataset.py dataset.csv
 
-# Training (with fine-tuning, L1 loss)
+# Training
 python train.py \
-  --loss-space cov --cov-loss l1 \
-  --epochs 200 --patience 40 --batch-size 256 --lr 1e-3 \
-  --finetune-batch-sizes 32 8 2 --finetune-epochs-per-stage 300 \
-  --finetune-lr 1e-4 --finetune-lr-decay 0.5 \
-  --finetune-plateau-patience 5 --finetune-min-lr 1e-6 \
+  --cov-loss l1 \
+  --epochs 200 \
+  --patience 40 \
+  --batch-size 256 \
+  --lr 1e-3 \
+  --finetune-batch-sizes 32 8 2 \
+  --finetune-epochs-per-stage 300 \
+  --finetune-lr 1e-4 \
+  --finetune-lr-decay 0.5 \
+  --finetune-plateau-patience 5 \
+  --finetune-min-lr 1e-6 \
   --output-dir model-output-cov-l1-ft
 
 # Analysis
@@ -424,33 +457,45 @@ python analyze_covariance.py \
   --model-dir model-output-cov-l1-ft \
   --output-dir analysis-output-cov-l1-ft \
   --agreement-csv dataset-train.csv
+
+# Inference
+python infer_covariance.py \
+  --model-dir model-output-cov-l1-ft \
+  --input-csv dataset-test.csv \
+  --input-space sim \
+  --output-dir inference-sim
 ```
 
 ## Outputs Produced by the Pipeline
 
-- `dump.csv` — flat CSV converted from `dump.yaml`
-- `dump-particles_241-not-null.csv` — cleaned CSV with valid particle paths
-- `cov-targets.csv` — cleaned CSV plus 21 Cholesky target columns
-- `dataset.csv` — final ML dataset with feature and target columns only
-- `dataset-train.csv`, `dataset-val.csv`, `dataset-test.csv` — reproducible splits
-- `<model-dir>/model.pt` — trained model weights (best validation loss)
-- `<model-dir>/input_transformers.pt` — input feature scaler and column names
-- `<model-dir>/output_transformers.pt` — Cholesky target scaler and column names
-- `<model-dir>/covariance_transformers.pt` — per-element covariance normalizers
-- `<model-dir>/training_history.csv` — per-epoch loss history
-- `<analysis-dir>/test_metrics.csv` — per-element MAE/RMSE/MAPE on the test set
-- `<analysis-dir>/*.png` — training curve, error plots, agreement plots
+- `dump.csv` - flat CSV converted from `dump.yaml`
+- `dump-particles_241-not-null.csv` - cleaned CSV with valid particle paths
+- `cov-targets.csv` - cleaned CSV plus 21 Cholesky target columns
+- `dataset.csv` - final ML dataset with 7 inputs and 21 targets
+- `dataset-train.csv`, `dataset-val.csv`, `dataset-test.csv` - reproducible splits
+- `<model-dir>/model.pt` - trained model weights
+- `<model-dir>/input_transformers.pt` - input feature scaler and feature column names
+- `<model-dir>/output_transformers.pt` - Cholesky target scaler and target column names
+- `<model-dir>/covariance_transformers.pt` - covariance-element normalizers
+- `<model-dir>/training_history.csv` - per-epoch loss history
+- `<inference-dir>/predicted_covariances.csv` - flat inference output with inputs and predictions
+- `<inference-dir>/predicted_covariances.npy` - raw `(N, 6, 6)` predictions
+- `lumetorchyaml/injector_machine.yaml` - exported `lume-torch` wrapper generated during inference
+- `<analysis-dir>/test_metrics.csv` - per-element evaluation metrics
+- `<analysis-dir>/*.png` - training and diagnostic plots
 
 ## Scripts Reference
 
 | Script | Purpose |
 |---|---|
-| `create_csv_from_yaml.py` | Convert `dump.yaml` to flat CSV |
+| `create_csv_from_yaml.py` | Convert `dump.yaml` to a flat CSV |
 | `cleanup.py` | Filter rows missing `particles_241` |
 | `create_cov_targets_from_particles.py` | Compute Cholesky targets from OpenPMD particle files |
-| `create_dataset.py` | Drop non-training columns to produce final dataset |
-| `split_dataset.py` | Split dataset into train/val/test CSVs |
-| `train.py` | Train covariance MLP; supports L1/MSE loss and staged fine-tuning |
-| `analyze_covariance.py` | Evaluate a trained model; generates metrics and all agreement/diagnostic plots |
-| `plot_input_histograms.py` | Plot distributions of all 38 input parameters from any split CSV |
-| `create_interpolation_holdout.py` | Carve out a sorted contiguous block from training data as a secondary interpolation test set |
+| `create_dataset.py` | Keep the approved 7 inputs plus the 21 covariance targets |
+| `split_dataset.py` | Split the dataset into train, validation, and test CSVs |
+| `train.py` | Train the covariance MLP and save scaling metadata |
+| `analyze_covariance.py` | Evaluate a trained model and generate plots |
+| `infer_covariance.py` | Run inference from simulator-space or machine-space CSV inputs |
+| `pv_mapping.py` | Define the affine machine-PV to simulator-parameter mapping |
+| `plot_input_histograms.py` | Plot input distributions from a split CSV |
+| `create_interpolation_holdout.py` | Carve out a contiguous interpolation gap from the training set |
