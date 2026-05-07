@@ -11,7 +11,7 @@ from botorch.models.transforms.input import AffineInputTransform
 
 PV_MAPPING_BY_SIM_PARAM = {
     "CQ10121:b1_gradient": {
-        "experimental_pv": "QUAD:IN10:121:BACT",
+        "experimental_pv": "QUAD:IN10:121:BCTRL",
         "pv_precision": 4,
         "sim_scaling": -2.1,
         "sim_offset": 0.0,
@@ -29,13 +29,13 @@ PV_MAPPING_BY_SIM_PARAM = {
         "sim_offset": 152.3,
     },
     "SOL10111:solenoid_field_scale": {
-        "experimental_pv": "SOLN:IN10:121:BACT",
+        "experimental_pv": "SOLN:IN10:121:BCTRL",
         "pv_precision": 4,
         "sim_scaling": 1.6,
         "sim_offset": 0.0,
     },
     "SQ10122:b1_gradient": {
-        "experimental_pv": "QUAD:IN10:122:BACT",
+        "experimental_pv": "QUAD:IN10:122:BCTRL",
         "pv_precision": 4,
         "sim_scaling": -2.1,
         "sim_offset": 0.0,

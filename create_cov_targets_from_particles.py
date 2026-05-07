@@ -1,6 +1,7 @@
 """Create Cholesky-flattened covariance targets from particles_241 OpenPMD files."""
 #python create_cov_targets.py dump-particles_241-not-null.csv cov-targets.csv --progress-every 100 --drop-failed
 import argparse
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -48,6 +49,14 @@ def build_parser():
         action="store_true",
         help="Drop rows where covariance/cholesky extraction failed",
     )
+    parser.add_argument(
+        "--errors-csv",
+        default=None,
+        help=(
+            "Optional CSV path to write failed-row details, including "
+            "exception type and message"
+        ),
+    )
     return parser
 
 
@@ -82,11 +91,15 @@ def main():
     total_rows = len(df)
     vectors = []
     statuses = []
+    error_types = []
+    error_messages = []
     expected_len = None
 
     for i, file_path in enumerate(df[args.particles_column], start=1):
         status = "ok"
         vec = None
+        error_type = ""
+        error_message = ""
 
         try:
             if pd.isna(file_path) or not str(file_path).strip():
@@ -100,14 +113,20 @@ def main():
                     expected_len = len(vec)
                 elif len(vec) != expected_len:
                     status = f"shape_mismatch:{len(vec)}"
+                    error_type = "shape_mismatch"
+                    error_message = f"Expected {expected_len}, got {len(vec)}"
                     vec = None
 
         except Exception as exc:
             status = f"error:{type(exc).__name__}"
+            error_type = type(exc).__name__
+            error_message = str(exc)
             vec = None
 
         vectors.append(vec)
         statuses.append(status)
+        error_types.append(error_type)
+        error_messages.append(error_message)
 
         if args.progress_every and i % args.progress_every == 0:
             ok_count = sum(s == "ok" for s in statuses)
@@ -116,6 +135,29 @@ def main():
                 f"[run] {i}/{total_rows} processed (ok={ok_count}, failed={fail_count})",
                 flush=True,
             )
+
+    out_df = df.copy()
+    out_df["cov_target_status"] = statuses
+    out_df["cov_target_error_type"] = error_types
+    out_df["cov_target_error_message"] = error_messages
+
+    status_counts = Counter(statuses)
+    failure_counts = [(status, count) for status, count in status_counts.items() if status != "ok"]
+
+    if failure_counts:
+        print("[run] Failure summary:", flush=True)
+        for status, count in sorted(failure_counts, key=lambda item: (-item[1], item[0]))[:10]:
+            print(f"[run]   {status}: {count}", flush=True)
+
+    if args.errors_csv:
+        errors_df = out_df[out_df["cov_target_status"] != "ok"].copy()
+        errors_df.insert(0, "source_row_index", errors_df.index)
+        errors_path = Path(args.errors_csv)
+        print(
+            f"[run] Writing {errors_path} (failed_rows={len(errors_df)})",
+            flush=True,
+        )
+        errors_df.to_csv(errors_path, index=False)
 
     if expected_len is None:
         raise SystemExit("No valid covariance vectors were generated. Check file access.")
@@ -128,8 +170,7 @@ def main():
             target_matrix[row_idx, :] = vec
 
     targets_df = pd.DataFrame(target_matrix, columns=target_col_names)
-    out_df = pd.concat([df, targets_df], axis=1)
-    out_df["cov_target_status"] = statuses
+    out_df = pd.concat([out_df, targets_df], axis=1)
 
     if args.drop_failed:
         out_df = out_df[out_df["cov_target_status"] == "ok"].copy()

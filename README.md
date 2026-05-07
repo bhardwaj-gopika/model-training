@@ -144,6 +144,23 @@ Useful option:
 python create_dataset.py cov-targets.csv dataset.csv --drop-null-rows
 ```
 
+If you need to merge the historical cov-targets file in `old/` with the current one before retraining:
+
+```bash
+python combine_cov_targets.py \
+  --old-csv old/cov-targets.csv \
+  --current-csv cov-targets.csv \
+  --merged-output combined-cov-targets.csv \
+  --dataset-output dataset-combined.csv
+```
+
+Default behavior for the merge script:
+
+- Concatenates `old/cov-targets.csv` and `cov-targets.csv`
+- Drops exact duplicate rows after concatenation
+- Writes `combined-cov-targets.csv`
+- Writes `dataset-combined.csv` with the same 7 inputs plus 21 `cov_chol_*` targets used by training
+
 ## 5. Split into Train, Validation, and Test Sets
 
 Split the prepared dataset into reproducible train/validation/test files:
@@ -332,7 +349,9 @@ The inference path is:
 3. If the CSV is machine-space, map PV values into simulator parameter space using the affine rules in `pv_mapping.py`.
 4. Normalize the simulator-space inputs with the saved training `x_mean` and `x_std`.
 5. Run the surrogate model to produce a `(N, 6, 6)` covariance prediction array.
-6. Export a `lume-torch` wrapper, run the same machine inputs through that wrapper, and assert that the direct and wrapper predictions match.
+6. Export two `lume-torch` wrappers and validate both against the direct model:
+   - **Sim-input model** (`lumetorchyaml-sim/`): accepts simulator parameters, applies normalization only.
+   - **Machine-input model** (`lumetorchyaml-machine/`): accepts machine PV values, applies PV-to-sim transform then normalization.
 7. Save both a flat CSV and a NumPy array of the predictions.
 
 ### Example: simulator-space inference
