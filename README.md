@@ -2,7 +2,7 @@
 
 This repository contains the scripts used to turn `dump.yaml` into a reproducible machine learning dataset for predicting 6x6 beam covariance matrices.
 
-The current model is trained on 7 approved simulator-space input parameters and predicts the 6x6 covariance matrix of the beam phase space `(x, px, y, py, z, pz)`. Internally the network predicts 21 lower-triangular Cholesky factors, reconstructs `C = L @ L^T`, and computes loss in normalized covariance space using per-element statistics from the training split. The inference entrypoint also supports machine-facing PV inputs by mapping them into simulator parameter space before normalization and model evaluation.
+The current model is trained on 7 approved simulator-space input parameters and predicts the 6x6 covariance matrix of the beam phase space `(x, px, y, py, t, pz)`. Internally the network predicts 21 lower-triangular Cholesky factors, reconstructs `C = L @ L^T`, and computes loss in normalized covariance space using per-element statistics from the training split. The inference entrypoint also supports machine-facing PV inputs by mapping them into simulator parameter space before normalization and model evaluation.
 
 ## Environment
 
@@ -61,7 +61,7 @@ Expected output:
 
 ## 3. Create Cholesky Covariance Targets
 
-Read each `particles_241` OpenPMD particle file, compute the 6D covariance matrix over `(x, px, y, py, z, pz)`, apply a Cholesky decomposition, and flatten the lower triangle into 21 target columns:
+Read each `particles_241` OpenPMD particle file, compute the 6D covariance matrix over `(x, px, y, py, t, pz)`, apply a Cholesky decomposition, and flatten the lower triangle into 21 target columns:
 
 ```bash
 python create_cov_targets_from_particles.py \
@@ -485,6 +485,53 @@ python infer_covariance.py \
   --output-dir inference-sim
 ```
 
+## 11. Compare Lume-Torch Predictions vs Particle Ground Truth
+
+Use `compare_2d_distributions_241.py` to evaluate the exported lume-torch model (machine-unit inputs) against ground-truth covariance matrices computed directly from particle h5 files. This generates 2D phase-space ellipse comparisons, scatter grids, and heatmap plots.
+
+### Basic usage
+
+```bash
+python compare_2d_distributions_241.py
+```
+
+### With options
+
+```bash
+python compare_2d_distributions_241.py \
+  --lume-yaml lumetorchyaml-machine/injector_machine.yaml \
+  --dump-csv 241/dump.csv \
+  --output-dir compare-2d-241 \
+  --max-samples 200 \
+  --n-ellipse-samples 5
+```
+
+### Single sample ellipse plot
+
+```bash
+python compare_2d_distributions_241.py --sample-indices 42
+```
+
+### Key options
+
+| Flag | Default | Description |
+|---|---|---|
+| `--lume-yaml` | `lumetorchyaml-machine/injector_machine.yaml` | Path to the lume-torch YAML config |
+| `--dump-csv` | `241/dump.csv` | CSV with `particles_241` h5 paths and sim input columns |
+| `--output-dir` | `compare-2d-241` | Output directory for plots |
+| `--max-samples` | all | Subsample to this many rows |
+| `--sample-indices` | first N | Specific row indices for per-sample ellipse plots |
+| `--n-ellipse-samples` | `5` | Number of per-sample ellipse plots |
+| `--batch-size` | `256` | Inference batch size |
+| `--seed` | `42` | Random seed for subsampling |
+
+### Generated outputs in `--output-dir`
+
+- `machine_inputs.csv` - machine-unit inputs used for evaluation
+- `scatter_grid.png` - true vs predicted scatter for all 36 covariance elements
+- `sample_<N>_ellipses.png` - per-sample 2D ellipse comparison plots
+- `sample_<N>_heatmap.png` - per-sample covariance matrix heatmap comparison
+
 ## Outputs Produced by the Pipeline
 
 - `dump.csv` - flat CSV converted from `dump.yaml`
@@ -518,3 +565,6 @@ python infer_covariance.py \
 | `pv_mapping.py` | Define the affine machine-PV to simulator-parameter mapping |
 | `plot_input_histograms.py` | Plot input distributions from a split CSV |
 | `create_interpolation_holdout.py` | Carve out a contiguous interpolation gap from the training set |
+| `compare_2d_distributions_241.py` | Compare lume-torch predicted covariance vs particle ground truth |
+| `scatter_lume_vs_particles.py` | Scatter plots of lume-torch vs particle covariance elements |
+| `scatter_true_vs_predicted.py` | Scatter plots of surrogate model vs particle covariance elements |
