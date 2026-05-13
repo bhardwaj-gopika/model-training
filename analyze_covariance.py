@@ -1,4 +1,4 @@
-"""Analyze training results for covariance-output models."""
+"""Analyze training results for covariance-output models (241)."""
 
 import argparse
 from pathlib import Path
@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from train import build_model, chol_vectors_to_covariance
 
 
-def load_model_and_transformers(model_dir: Path, n_inputs=38, n_outputs=21):
+def load_model_and_transformers(model_dir: Path, n_inputs=7, n_outputs=21):
     """Load trained covariance-output model and transformation dictionaries."""
     model = build_model(n_inputs, n_outputs)
     model.load_state_dict(torch.load(model_dir / "model.pt", weights_only=True))
@@ -254,7 +254,7 @@ def plot_sorted_by_magnitude_overlay(
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="Analyze covariance-output training results.")
+    parser = argparse.ArgumentParser(description="Analyze covariance-output training results (241).")
     parser.add_argument(
         "--model-dir",
         default="model-output",
