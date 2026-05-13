@@ -1,5 +1,10 @@
-"""Create Cholesky-flattened covariance targets from particles_241 OpenPMD files."""
-#python create_cov_targets.py dump-particles_241-not-null.csv cov-targets.csv --progress-every 100 --drop-failed
+"""Create Cholesky-flattened covariance targets from particles OpenPMD files.
+
+Optionally drifts particles to an exact z position and applies an M-normalization
+(C_norm = M @ C @ M^T) before the Cholesky decomposition.
+"""
+#python create_cov_targets_from_particles.py dump-particles_241-not-null.csv cov-targets.csv --progress-every 100 --drop-failed
+#python create_cov_targets_from_particles.py dump-particles_241-not-null.csv cov-targets.csv --drift-to-z 0.942084 --normalize --progress-every 100 --drop-failed
 import argparse
 from collections import Counter
 from pathlib import Path
@@ -57,7 +62,36 @@ def build_parser():
             "exception type and message"
         ),
     )
+    parser.add_argument(
+        "--drift-to-z",
+        type=float,
+        default=None,
+        help=(
+            "Drift all particles to this z position (meters) before computing "
+            "covariance. Required for element 241 (z=0.942084) to get meaningful "
+            "t spread. (default: no drift)"
+        ),
+    )
+    parser.add_argument(
+        "--normalize",
+        action="store_true",
+        help=(
+            "Apply M-normalization C_norm = M @ C @ M^T with "
+            "M = diag(1e3, 1e-6, 1e3, 1e-6, 1e12, 1e-6) before Cholesky. "
+            "Brings all phase-space dimensions to comparable scales."
+        ),
+    )
     return parser
+
+
+# M-normalization matrix: brings (x, px, y, py, t, pz) to comparable scales
+M_DIAG = np.array([1e3, 1e-6, 1e3, 1e-6, 1e12, 1e-6])
+M = np.diag(M_DIAG)
+
+
+def normalize_covariance(cov: np.ndarray) -> np.ndarray:
+    """Apply M @ cov @ M^T normalization."""
+    return M @ cov @ M.T
 
 
 def cholesky_nonzero_vector(cov, tol=0.0):
@@ -106,7 +140,11 @@ def main():
                 status = "missing_path"
             else:
                 group = ParticleGroup(str(file_path))
-                cov = group.cov('x', 'px', 'y', 'py', 'z', 'pz')
+                if args.drift_to_z is not None:
+                    group.drift_to_z(z=args.drift_to_z)
+                cov = np.asarray(group.cov('x', 'px', 'y', 'py', 't', 'pz'), dtype=float)
+                if args.normalize:
+                    cov = normalize_covariance(cov)
                 vec = cholesky_nonzero_vector(cov, tol=args.nonzero_tol)
 
                 if expected_len is None:

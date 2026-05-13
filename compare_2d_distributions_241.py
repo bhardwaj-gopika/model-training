@@ -34,15 +34,27 @@ from pv_mapping import (
 PHASE_SPACE_LABELS = ["x", "px", "y", "py", "t", "pz"]
 PHASE_SPACE_UNITS = ["m", "rad", "m", "rad", "s", "eV/c"]
 
+# M-normalization matrix: brings (x, px, y, py, t, pz) to comparable scales
+M_DIAG = np.array([1e3, 1e-6, 1e3, 1e-6, 1e12, 1e-6])
+M = np.diag(M_DIAG)
+
+# Default screen position for element 241 (meters from cathode)
+DEFAULT_DRIFT_Z_241 = 0.942084
+
 
 def load_lume_model(yaml_path: str) -> TorchModule:
     torch_model = TorchModel(yaml_path)
     return TorchModule(model=torch_model)
 
 
-def gt_covariance_from_h5(h5_path: str) -> np.ndarray:
+def gt_covariance_from_h5(h5_path: str, drift_to_z: float = None, normalize: bool = False) -> np.ndarray:
     beam = ParticleGroup(h5=h5_path)
-    return beam.cov("x", "px", "y", "py", "t", "pz")
+    if drift_to_z is not None:
+        beam.drift_to_z(z=drift_to_z)
+    cov = np.asarray(beam.cov("x", "px", "y", "py", "t", "pz"), dtype=float)
+    if normalize:
+        cov = M @ cov @ M.T
+    return cov
 
 
 def draw_2d_ellipse(ax, cov_2x2, mean=(0, 0), n_std=2.0, **kwargs):
@@ -278,6 +290,22 @@ def build_parser():
         "--seed", type=int, default=42,
         help="Random seed for subsampling (default: 42)",
     )
+    p.add_argument(
+        "--drift-to-z", type=float, default=None,
+        help=(
+            "Drift particles to this z position (meters) before computing "
+            "ground-truth covariance. For element 241: 0.942084 (default: no drift)"
+        ),
+    )
+    p.add_argument(
+        "--normalize",
+        action="store_true",
+        help=(
+            "Apply M-normalization C_norm = M @ C @ M^T with "
+            "M = diag(1e3, 1e-6, 1e3, 1e-6, 1e12, 1e-6) to ground-truth covariance. "
+            "Must match the normalization used during training."
+        ),
+    )
     return p
 
 
@@ -370,7 +398,7 @@ def main():
         if (i + 1) % 100 == 0:
             print(f"  ... {i + 1}/{len(h5_paths)}", flush=True)
         try:
-            cov = gt_covariance_from_h5(h5_path)
+            cov = gt_covariance_from_h5(h5_path, drift_to_z=args.drift_to_z, normalize=args.normalize)
             true_covs_list.append(cov)
             valid_indices.append(i)
         except Exception as exc:

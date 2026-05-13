@@ -25,6 +25,26 @@ from pv_mapping import (
 )
 
 
+# M-normalization diagonal used during training.
+# The model predicts covariance in M-normalized space; this converts to physical units.
+M_DIAG = torch.tensor([1e3, 1e-6, 1e3, 1e-6, 1e12, 1e-6], dtype=torch.float32)
+
+
+class CovarianceDenormTransform(torch.nn.Module):
+    """Output transformer: M-normalized covariance -> physical units.
+
+    Applies C_phys = M_inv @ C_norm @ M_inv^T where M = diag(M_DIAG).
+    """
+
+    def __init__(self, m_diag: torch.Tensor = M_DIAG):
+        super().__init__()
+        self.register_buffer("m_inv_diag", 1.0 / m_diag)
+
+    def forward(self, cov: torch.Tensor) -> torch.Tensor:
+        m_inv = torch.diag(self.m_inv_diag)
+        return m_inv @ cov @ m_inv.T
+
+
 def covariance_labels():
     return [f"cov_{row}{col}" for row in range(6) for col in range(6)]
 
@@ -132,11 +152,14 @@ def create_lume_torch_sim(model, input_tr, dump_dir="lumetorchyaml-sim"):
         d=len(feature_cols), coefficient=x_std, offset=x_mean
     )
 
+    denorm_transform = CovarianceDenormTransform(M_DIAG)
+
     torch_model = TorchModel(
         model=model,
         input_variables=input_variables,
         output_variables=output_variables,
         input_transformers=[normalization_transform],
+        output_transformers=[denorm_transform],
         precision="single",
     )
 
@@ -165,11 +188,14 @@ def create_lume_torch_machine(model, input_tr, dump_dir="lumetorchyaml-machine")
         d=len(feature_cols), coefficient=x_std, offset=x_mean
     )
 
+    denorm_transform = CovarianceDenormTransform(M_DIAG)
+
     torch_model = TorchModel(
         model=model,
         input_variables=input_variables,
         output_variables=output_variables,
         input_transformers=[pv_to_sim_transform, normalization_transform],
+        output_transformers=[denorm_transform],
         precision="single",
     )
 
@@ -228,9 +254,12 @@ def main():
             pred_batches.append(pred_cov)
 
     pred_batches_lume_ref = []
+    m_inv = np.diag(1.0 / M_DIAG.numpy())
     with torch.no_grad():
         for (X_batch,) in loader1_lume_check:
             pred_cov = model(X_batch.to(device)).cpu().numpy()
+            # Apply M-denormalization to match the lume-torch output
+            pred_cov = np.array([m_inv @ c @ m_inv.T for c in pred_cov])
             pred_batches_lume_ref.append(pred_cov)
 
     # --- Sim-input LUME-torch model validation ---
@@ -266,6 +295,8 @@ def main():
     with torch.no_grad():
         for (X_batch,) in loader_machine_ref:
             pred_cov = model(X_batch.to(device)).cpu().numpy()
+            # Apply M-denormalization to match the lume-torch output
+            pred_cov = np.array([m_inv @ c @ m_inv.T for c in pred_cov])
             pred_batches_machine_ref.append(pred_cov)
     preds_cov_machine_ref = np.concatenate(pred_batches_machine_ref, axis=0)
 

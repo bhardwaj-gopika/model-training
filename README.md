@@ -15,7 +15,7 @@ conda activate modeling
 
 ## End-to-End Workflow
 
-The current workflow has 10 stages:
+The current workflow has 14 stages:
 
 1. Convert `dump.yaml` to CSV
 2. Remove rows without `particles_241`
@@ -24,9 +24,13 @@ The current workflow has 10 stages:
 5. Split the dataset into train, validation, and test CSVs
 6. Train the covariance MLP
 7. Analyze model performance
-8. Run inference from simulator or machine inputs
-9. (Optional) Create an interpolation holdout
-10. (Optional) Plot input parameter distributions
+8. Run inference and export lume-torch models with output denormalization
+9. Plot beam phase-space overlays (predicted vs true particles)
+10. Run end-to-end demo
+11. Run benchmark tests
+12. (Optional) Create an interpolation holdout
+13. (Optional) Plot input parameter distributions
+14. (Optional) Compare lume-torch predictions vs particle ground truth
 
 All commands below assume you are running them from the repository root.
 
@@ -82,6 +86,37 @@ Notes:
 
 - `--drop-failed` removes rows where covariance extraction failed.
 - The script keeps all 21 lower-triangular Cholesky elements for a fixed-width target vector.
+
+### Drift to z (element 241)
+
+For the 241 screen model, particles in the OpenPMD files are not all recorded at the same longitudinal position. To get a meaningful time (`t`) spread in the covariance, all particles must be drifted to a common z position before computing the covariance matrix:
+
+```bash
+python create_cov_targets_from_particles.py \
+  dump-particles_241-not-null.csv cov-targets.csv \
+  --drift-to-z 0.942084 \
+  --normalize \
+  --progress-every 100 \
+  --drop-failed
+```
+
+The drift-to-z value `0.942084` meters corresponds to the element 241 screen location. For the 571 screen model, no drift is needed because the particles are already at a consistent z position.
+
+### M-normalization
+
+The six phase-space dimensions `(x, px, y, py, t, pz)` span vastly different scales (meters vs eV/c vs seconds). To bring them to comparable magnitudes for training, the covariance matrix is transformed as:
+
+$$C_{\text{norm}} = M \, C \, M^T$$
+
+where $M = \text{diag}(10^3, 10^{-6}, 10^3, 10^{-6}, 10^{12}, 10^{-6})$. This scaling maps:
+
+| Dimension | Physical unit | Scale factor | Effect |
+|---|---|---|---|
+| x, y | meters | $10^3$ | mm-scale |
+| px, py, pz | eV/c | $10^{-6}$ | MeV/c-scale |
+| t | seconds | $10^{12}$ | ps-scale |
+
+The Cholesky decomposition and training are performed on $C_{\text{norm}}$. At inference time, the `CovarianceDenormTransform` output transformer reverses this via $C_{\text{phys}} = M^{-1} C_{\text{norm}} (M^{-1})^T$ to return the covariance in original physical units.
 
 ## 4. Create the Final Dataset
 
@@ -352,6 +387,7 @@ The inference path is:
 6. Export two `lume-torch` wrappers and validate both against the direct model:
    - **Sim-input model** (`lumetorchyaml-sim/`): accepts simulator parameters, applies normalization only.
    - **Machine-input model** (`lumetorchyaml-machine/`): accepts machine PV values, applies PV-to-sim transform then normalization.
+   - Both models include a `CovarianceDenormTransform` output transformer that converts the M-normalized covariance prediction into physical units via `C_phys = M_inv @ C_norm @ M_inv^T`, where `M = diag([1e3, 1e-6, 1e3, 1e-6, 1e12, 1e-6])`.
 7. Save both a flat CSV and a NumPy array of the predictions.
 
 ### Example: simulator-space inference
@@ -385,7 +421,92 @@ python infer_covariance.py \
 
 The script also prints one selected covariance matrix, the machine-space inputs for that row, and the mapped simulator-space values. `--print-row` defaults to `0`.
 
-## 9. (Optional) Create an Interpolation Holdout
+## 9. Plot Beam Phase-Space Overlays
+
+Use `plot_beam_overlap.py` to overlay the model's predicted particle distribution against the true OpenPMD particles from simulation. For each sample, the script evaluates the model to get the predicted 6x6 covariance, samples particles from it, and plots them alongside the true particles in 2D phase-space projections.
+
+```bash
+python plot_beam_overlap.py \
+  --particles-csv particles_241-not-null.csv \
+  --input-space machine \
+  --num-samples 5 \
+  --output-dir overlap-plots
+```
+
+### Key options
+
+| Flag | Default | Description |
+|---|---|---|
+| `--particles-csv` | `particles-571.csv` | CSV with `bmad_final_particles` column |
+| `--input-space` | `sim` | Model input space: `sim` or `machine` |
+| `--num-samples` | `5` | Number of random samples to plot |
+| `--sample-indices` | None | Specific row indices (overrides `--num-samples`) |
+| `--n-particles` | `10000` | Particles to sample from predicted covariance |
+| `--projections` | `x-px y-py` | Phase-space projections to plot |
+| `--output-dir` | `overlap-plots` | Output directory |
+
+### Generated outputs
+
+- `overlap_sample_<N>.png` — per-sample scatter overlay of true (blue) vs predicted (orange) particles
+
+## 10. End-to-End Demo
+
+Use `end_to_end_demo.py` to demonstrate the full model pipeline in a single script. This is suitable for presenting the model to stakeholders.
+
+The demo runs four steps:
+
+1. Load the machine-PV model via `load_model("machine")`
+2. Call `model.evaluate()` with a PV-unit input dict and print the predicted covariance matrix
+3. Wrap the model in `BeamOutputModel` to generate a particle distribution from the predicted covariance
+4. Compare the predicted distribution against true OpenPMD particles for multiple test samples
+
+```bash
+python end_to_end_demo.py \
+  --particles-csv particles_241-not-null.csv \
+  --num-samples 3 \
+  --output-dir demo-output
+```
+
+### Example model call (machine PV units)
+
+```python
+from facet2_inj_ml_model import load_model
+
+model = load_model()
+result = model.evaluate({
+    "QUAD:IN10:121:BCTRL": 0.03196033090353012,
+    "KLYS:LI10:21:AMPL": 40.167457580566406,
+    "KLYS:LI10:21:PHAS": 74.87874603271484,
+    "SOLN:IN10:121:BCTRL": 0.43,
+    "QUAD:IN10:122:BCTRL": 0.0315588042140007,
+    "distgen:t_dist:sigma_t:value": 0.43811073899269104,
+    "TORO:IN10:591:TMIT_PC": 954.0297241210938,
+})
+print(result)
+```
+
+### Generated outputs
+
+- Console output showing model loading, evaluate result, and particle statistics
+- `demo-output/demo_overlap_<N>.png` — phase-space overlay plots (x-px, y-py)
+
+## 11. Benchmark Tests
+
+Use `test_model_benchmark.py` to run regression tests that verify the model continues to produce correct outputs. These tests use `pytest` and cover:
+
+- **Model loading** — both machine and sim models load and expose `covariance_matrix` output
+- **Evaluate regression** — the covariance output for a reference input must match a verified snapshot
+- **Covariance properties** — shape (6x6), symmetry, and eigenvalue sanity
+- **BeamOutputModel** — particle generation produces correct dimensions and statistics
+- **PV mapping** — sim ↔ machine roundtrip conversion stays consistent
+
+```bash
+pytest test_model_benchmark.py -v
+```
+
+All tests run against the installed `facet2_inj_ml_model` package, so they validate the packaged model end-to-end.
+
+## 12. (Optional) Create an Interpolation Holdout
 
 To test interpolation performance, exclude a contiguous block of samples from the middle of the training set when sorted by a chosen input parameter:
 
@@ -431,7 +552,7 @@ python analyze_covariance.py \
   --output-dir analysis-output-interp-sigmat-gap30-l1
 ```
 
-## 10. (Optional) Plot Input Parameter Distributions
+## 13. (Optional) Plot Input Parameter Distributions
 
 ```bash
 python plot_input_histograms.py \
@@ -483,9 +604,25 @@ python infer_covariance.py \
   --input-csv dataset-test.csv \
   --input-space sim \
   --output-dir inference-sim
+
+# Beam overlay plots
+python plot_beam_overlap.py \
+  --particles-csv particles_241-not-null.csv \
+  --input-space machine \
+  --num-samples 5 \
+  --output-dir overlap-plots
+
+# End-to-end demo
+python end_to_end_demo.py \
+  --particles-csv particles_241-not-null.csv \
+  --num-samples 3 \
+  --output-dir demo-output
+
+# Benchmark tests
+pytest test_model_benchmark.py -v
 ```
 
-## 11. Compare Lume-Torch Predictions vs Particle Ground Truth
+## 14. Compare Lume-Torch Predictions vs Particle Ground Truth
 
 Use `compare_2d_distributions_241.py` to evaluate the exported lume-torch model (machine-unit inputs) against ground-truth covariance matrices computed directly from particle h5 files. This generates 2D phase-space ellipse comparisons, scatter grids, and heatmap plots.
 
@@ -563,6 +700,10 @@ python compare_2d_distributions_241.py --sample-indices 42
 | `analyze_covariance.py` | Evaluate a trained model and generate plots |
 | `infer_covariance.py` | Run inference from simulator-space or machine-space CSV inputs |
 | `pv_mapping.py` | Define the affine machine-PV to simulator-parameter mapping |
+| `plot_beam_overlap.py` | Plot phase-space overlays: predicted particles vs true OpenPMD particles |
+| `end_to_end_demo.py` | End-to-end demo: load model, evaluate, generate particles, overlay plots |
+| `test_model_benchmark.py` | Regression benchmark tests for the packaged model (pytest) |
+| `BeamOutputModel.py` | LUME wrapper that generates particle distributions from predicted covariance |
 | `plot_input_histograms.py` | Plot input distributions from a split CSV |
 | `create_interpolation_holdout.py` | Carve out a contiguous interpolation gap from the training set |
 | `compare_2d_distributions_241.py` | Compare lume-torch predicted covariance vs particle ground truth |
